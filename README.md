@@ -1,5 +1,7 @@
 # Sistema de recomendación para grupos
 
+## Instalación entorno virtual
+
 El desarrollo de esta práctica se ha realizado utilizando un entorno virtual de Python para poder instalar de forma aislada las dependencias necesarias. En nuestro caso se ha utilizado la versión 3.12 de Python en Windows y verificado con Linux basado en Debian con versión 3.10.
 
 En Windows:
@@ -32,4 +34,18 @@ Además, en Windows será necesario tener instalado la versión 14.0 o mayor de 
 ```
 python -m pip install --upgrade pip setuptools wheel
 pip install -r ./requirements.txt
+```
+
+## Ejecución notebook
+
+Si se desea ejecutar el notebook, primero será necesario instalar `notebook` en el entorno virtual:
+
+```
+pip install notebook
+```
+
+Una vez hecho esto, podemos lanzar el servidor y abrir `notebook.ipynb`:
+
+```
+jupyter notebook notebook.ipynb
 ```
