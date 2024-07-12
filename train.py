@@ -98,6 +98,32 @@ def map_users_to_groups(df, group_size, seed):
             user_group_map[user] = i
     return user_group_map
 
+def split_train_test(df, train_size, seed):
+    """Performs a holdout partition of the given dataset.
+    
+    Extracted from https://github.com/NicolasHug/Surprise/blob/master/examples/split_data_for_unbiased_estimation.py
+
+    Parameters:
+        df (pd.DataFrame): ratings dataset.
+        train_size (float): proportion of instances (ratings) to be included into the train dataset in a
+            train-test holdout.
+        seed (int): used to shuffle and partition in a reproducible manner.
+            
+    Returns:
+        surprise.DatasetAutoFolds: train dataset.
+        list[tuple[str, str, float]]: test dataset (user id, item id, true rating).
+    """
+    reader = surprise.Reader(rating_scale=(0.5, 5))
+    df = df.sample(frac=1, random_state=seed) # shuffle the dataset
+    data = surprise.Dataset.load_from_df(df, reader)
+    raw_ratings = data.raw_ratings
+    threshold = int(train_size * len(raw_ratings))
+    train_raw_ratings = raw_ratings[:threshold]
+    test_raw_ratings = raw_ratings[threshold:]
+    data.raw_ratings = train_raw_ratings
+    testset = data.construct_testset(test_raw_ratings)
+    return data, testset
+
 def get_precision_and_recall_at_k(predictions, k, threshold):
     """Return precision and recall at k metrics for each group.
     
@@ -230,7 +256,7 @@ def get_rmse_on_user_ratings(user_ratings_df, predictions):
     predictions_df = user_ratings_df.loc[user_ratings_df['predicted'].notnull(),]
     return np.sqrt(np.sum((predictions_df['rating'] - predictions_df['predicted']) ** 2) / predictions_df.shape[0])
 
-def compute_agg_models_metrics(df, predictions, num_predicted_items, relevance_threshold):
+def compute_agg_models_metrics(df, predictions, num_recommended_items, relevance_threshold):
     """Compute metrics on the predictions obtained using the Aggregated Models approach.
     
     Parameters:
@@ -242,7 +268,7 @@ def compute_agg_models_metrics(df, predictions, num_predicted_items, relevance_t
                 r_ui (float): true rating for the corresponding group.
                 est (float): estimated rating.
                 details (dict): additional details about the prediction.
-        num_predicted_items (int): number of items to recommend to each group.
+        num_recommended_items (int): number of items to recommend to each group.
         relevance_threshold (float): threshold used to check whether an item is relevant for a group or not.
             Must be in the [0.5, 5.0] range.
 
@@ -255,29 +281,29 @@ def compute_agg_models_metrics(df, predictions, num_predicted_items, relevance_t
     rmse_user_ratings = get_rmse_on_user_ratings(df, predictions)
     print(f' - RMSE on original user ratings: {rmse_user_ratings}')
 
-    precision_at_k, recall_at_k = get_precision_and_recall_at_k(predictions, num_predicted_items,
+    precision_at_k, recall_at_k = get_precision_and_recall_at_k(predictions, num_recommended_items,
                                                                 relevance_threshold)
-    print(f' - Precision@{num_predicted_items}: {precision_at_k}')
-    print(f' - Recall@{num_predicted_items}: {recall_at_k}')
+    print(f' - Precision@{num_recommended_items}: {precision_at_k}')
+    print(f' - Recall@{num_recommended_items}: {recall_at_k}')
 
     coverage = get_coverage(predictions, relevance_threshold)
     print(f' - Coverage: {coverage}')
 
     metrics = {
-        'RMSE-group-ratings': rmse_group_ratings,
-        'RMSE-user-ratings': rmse_user_ratings,
+        'RMSE_group_ratings': rmse_group_ratings,
+        'RMSE_user_ratings': rmse_user_ratings,
         'Precision@k': precision_at_k,
         'Recall@k': recall_at_k,
         'Coverage': coverage
     }
     return metrics
 
-def get_agg_model_file_path(model_name, group_size, train_size, seed):
+def get_agg_models_file_path(model_name, group_size, train_size, seed):
     """Creates the file path for a model trained using the Aggregated Models approach."""
     file_name = f'{model_name}_agg-models_g{group_size}_t{str(train_size).replace('.', '-')}_s{seed}'
     return os.path.join(SAVED_MODELS_DIR, file_name)
 
-def train_agg_models_model(model_name, train_size, group_size, num_predicted_items, relevance_threshold, seed,
+def train_agg_models_model(model_name, train_size, group_size, num_recommended_items, relevance_threshold, seed,
                            skip_training=False, save_model=True):
     """Trains a Group Recommender System following the Aggregated Models approach.
     Group profiles are created using the average rating given by the users for each item.
@@ -291,7 +317,7 @@ def train_agg_models_model(model_name, train_size, group_size, num_predicted_ite
         train_size (float): proportion of instances (ratings) to be included into the train dataset in a
             train-test holdout.
         group_size (int): number of users in each group.
-        num_predicted_items (int): number of items to recommend to each group.
+        num_recommended_items (int): number of items to recommend to each group.
         relevance_threshold (float): threshold used to check whether an item is relevant for a group or not.
             Must be in the [0.5, 5.0] range.
         seed (int): used for assigning users to groups, partitioning the data and in order to reproduce the
@@ -301,6 +327,8 @@ def train_agg_models_model(model_name, train_size, group_size, num_predicted_ite
         save_model (bool): whether to save the model parameters in the file system.
 
     Returns:
+        dict: best combination of hyperparameter values given the RMSE metric on the 5-CV. If training was
+            skipped, it will be None.
         dict: obtained value for each metric on the test dataset (best model).
 
     Raises:
@@ -323,8 +351,9 @@ def train_agg_models_model(model_name, train_size, group_size, num_predicted_ite
     trainset, testset = split_train_test(agg_df, train_size, seed)
 
     # 5. Train the model or load an already trained model
+    best_hyperparams_combination = None
     if skip_training:
-        file_path = get_agg_model_file_path(model_name, group_size, train_size, seed)
+        file_path = get_agg_models_file_path(model_name, group_size, train_size, seed)
         _, best_model = load(file_path)
     else:
         np.random.seed(seed)
@@ -336,7 +365,8 @@ def train_agg_models_model(model_name, train_size, group_size, num_predicted_ite
         gs = GridSearchCV(model_class, MODELS_HYPERPARAMS[model_name], measures=['rmse'], cv=5)
         gs.fit(trainset)
         end = time.time()
-        print(f"Best params: {gs.best_params['rmse']}, RMSE score: {gs.best_score['rmse']}")
+        best_hyperparams_combination = gs.best_params['rmse']
+        print(f"Best hyperparams: {best_hyperparams_combination}, RMSE score: {gs.best_score['rmse']}")
         print(f'Elapsed time: {end-start:.3f} seconds')
         best_model = gs.best_estimator['rmse']
         best_model.fit(trainset.build_full_trainset())
@@ -344,43 +374,17 @@ def train_agg_models_model(model_name, train_size, group_size, num_predicted_ite
     # 6. Evaluate the best model on the test dataset
     predictions = best_model.test(testset)
     print('Evaluation of best model on test dataset:')
-    metrics = compute_agg_models_metrics(df, predictions, num_predicted_items, relevance_threshold)
+    metrics = compute_agg_models_metrics(df, predictions, num_recommended_items, relevance_threshold)
 
     # 7. Save the model if requested and training was done
     if save_model and not skip_training:
         print('Saving best model...')
         saved_models_path = Path(SAVED_MODELS_DIR)
         saved_models_path.mkdir(exist_ok=True)
-        file_path = get_agg_model_file_path(model_name, group_size, train_size, seed)
+        file_path = get_agg_models_file_path(model_name, group_size, train_size, seed)
         dump(file_path, algo=best_model)
 
-    return metrics
-    
-def split_train_test(df, train_size, seed):
-    """Performs a holdout partition of the given dataset.
-    
-    Extracted from https://github.com/NicolasHug/Surprise/blob/master/examples/split_data_for_unbiased_estimation.py
-
-    Parameters:
-        df (pd.DataFrame): ratings dataset.
-        train_size (float): proportion of instances (ratings) to be included into the train dataset in a
-            train-test holdout.
-        seed (int): used to shuffle and partition in a reproducible manner.
-            
-    Returns:
-        surprise.DatasetAutoFolds: train dataset.
-        list[tuple[str, str, float]]: test dataset (user id, item id, true rating).
-    """
-    reader = surprise.Reader(rating_scale=(0.5, 5))
-    df = df.sample(frac=1, random_state=seed) # shuffle
-    data = surprise.Dataset.load_from_df(df, reader)
-    raw_ratings = data.raw_ratings
-    threshold = int(train_size * len(raw_ratings))
-    train_raw_ratings = raw_ratings[:threshold]
-    test_raw_ratings = raw_ratings[threshold:]
-    data.raw_ratings = train_raw_ratings
-    testset = data.construct_testset(test_raw_ratings)
-    return data, testset
+    return best_hyperparams_combination, metrics
 
 def get_agg_predictions_file_path(model_name, train_size, seed):
     """Creates the file path for a model trained using the Aggregated Predictions approach."""
@@ -402,17 +406,17 @@ def agg_predictions_average(df_predictions):
         {'r_ui': 'mean', 'est': 'mean'}).reset_index()
 
 def agg_predictions_average_without_misery(df_predictions, threshold=2.5):
-    """Aggregate predictions for each group using the average without missery approach.
+    """Aggregate predictions for each group using the average without misery approach.
     For each group and item, if any of the estimated values for the users in that group
     is below the provided threshold, then this item will not be returned for this group.
     The threshold defaults to half the maximum movie rating.
     Also averages the true ratings."""
-    avg_without_missery = df_predictions.groupby(['groupId', 'iid']).agg(
+    avg_without_misery = df_predictions.groupby(['groupId', 'iid']).agg(
         **{
             'r_ui': ('r_ui', 'mean'),
             'est': ('est', lambda x: np.nan if np.any(x < threshold) else np.mean(x))
         }).reset_index()
-    return avg_without_missery.loc[avg_without_missery['est'].notnull(),]
+    return avg_without_misery.loc[avg_without_misery['est'].notnull(),]
 
 def agg_predictions_multiplicative(df_predictions):
     """Aggregate predictions for each group using the multiplication of values.
@@ -485,7 +489,7 @@ def create_agg_predictions(strategy, df_predictions):
     if strategy == 'Borda Count':
         return agg_predictions_borda_count(df_predictions)
 
-def compute_agg_predictions_metrics(user_group_map, predictions, num_predicted_items, relevance_threshold):
+def compute_agg_predictions_metrics(user_group_map, predictions, num_recommended_items, relevance_threshold):
     """Compute metrics on the predictions obtained using the Aggregated Predictions approach.
     
     Parameters:
@@ -497,7 +501,7 @@ def compute_agg_predictions_metrics(user_group_map, predictions, num_predicted_i
                 r_ui (float): true rating for the corresponding group.
                 est (float): estimated rating.
                 details (dict): additional details about the prediction.
-        num_predicted_items (int): number of items to recommend to each group.
+        num_recommended_items (int): number of items to recommend to each group.
         relevance_threshold (float): threshold used to check whether an item is relevant for a group or not.
             Must be in the [0.5, 5.0] range.
 
@@ -508,7 +512,7 @@ def compute_agg_predictions_metrics(user_group_map, predictions, num_predicted_i
     print(f' - RMSE on original user ratings: {rmse_user_ratings}')
 
     metrics = {
-        'RMSE-user-ratings': rmse_user_ratings
+        'RMSE_user_ratings': rmse_user_ratings
     }
 
     # Include the groupId in the predictions dataframe
@@ -520,6 +524,8 @@ def compute_agg_predictions_metrics(user_group_map, predictions, num_predicted_i
         agg_strategy_metrics = {}
         print(f'\tStrategy: {strategy}')
         df_agg_predictions = create_agg_predictions(strategy, df_predictions)
+        # Convert it to the surprise format so that we can use the same functions to compute metrics
+        # that are used for the Aggregated Models strategy.
         agg_predictions = df_aggregated_predictions_to_tuple(df_agg_predictions)
 
         if strategy in AGG_PREDICTIONS_STRATEGIES_MAINTAINING_SCALE:
@@ -529,23 +535,23 @@ def compute_agg_predictions_metrics(user_group_map, predictions, num_predicted_i
             coverage = get_coverage(agg_predictions, relevance_threshold)
             print(f'\t - Coverage: {coverage}')
 
-            agg_strategy_metrics['RMSE-group-ratings'] = rmse_group_ratings
+            agg_strategy_metrics['RMSE_group_ratings'] = rmse_group_ratings
             agg_strategy_metrics['Coverage'] = coverage
 
-        precision_at_k, recall_at_k = get_precision_and_recall_at_k(agg_predictions, num_predicted_items,
+        precision_at_k, recall_at_k = get_precision_and_recall_at_k(agg_predictions, num_recommended_items,
                                                                     relevance_threshold)
-        print(f'\t - Precision@{num_predicted_items}: {precision_at_k}')
-        print(f'\t - Recall@{num_predicted_items}: {recall_at_k}\n')
+        print(f'\t - Precision@{num_recommended_items}: {precision_at_k}')
+        print(f'\t - Recall@{num_recommended_items}: {recall_at_k}\n')
 
         agg_strategy_metrics['Precision@k'] = precision_at_k
         agg_strategy_metrics['Recall@k'] = recall_at_k
 
         all_agg_strategy_metrics[strategy] = agg_strategy_metrics
     
-    metrics['by-strategy'] = all_agg_strategy_metrics
+    metrics['by_strategy'] = all_agg_strategy_metrics
     return metrics
 
-def train_agg_predictions_model(model_name, train_size, group_size, num_predicted_items, relevance_threshold, seed,
+def train_agg_predictions_model(model_name, train_size, group_size, num_recommended_items, relevance_threshold, seed,
                                 skip_training=False, save_model=True):
     """Trains a Group Recommender System following the Aggregated Predictions approach.
     Performs hyperparameter tuning using Grid Search. Computes metrics for every aggregation
@@ -559,7 +565,7 @@ def train_agg_predictions_model(model_name, train_size, group_size, num_predicte
         train_size (float): proportion of instances (ratings) to be included into the train dataset in a
             train-test holdout.
         group_size (int): number of users in each group.
-        num_predicted_items (int): number of items to recommend to each group.
+        num_recommended_items (int): number of items to recommend to each group.
         relevance_threshold (float): threshold used to check whether an item is relevant for a group or not.
             Must be in the [0.5, 5.0] range.
         seed (int): used for assigning users to groups, partitioning the data and in order to reproduce the
@@ -569,6 +575,8 @@ def train_agg_predictions_model(model_name, train_size, group_size, num_predicte
         save_model (bool): whether to save the model parameters in the file system.
 
     Returns:
+        dict: best combination of hyperparameter values given the RMSE metric on the 5-CV. If training was
+            skipped, it will be None.
         dict: obtained value for each metric on the test dataset (best model).
 
     Raises:
@@ -582,14 +590,12 @@ def train_agg_predictions_model(model_name, train_size, group_size, num_predicte
     
     # 2. Assign users to groups (first shuffle the user ids with the sample method)
     user_group_map = map_users_to_groups(df, group_size, seed)
-    
-    # 3. Include groupId in the dataset according to the obtained mapping 
-    df['groupId'] = df['userId'].map(user_group_map)
 
-    # 4. Create train and test datasets
-    trainset, testset = split_train_test(df[['userId', 'movieId', 'rating']], train_size, seed)
+    # 3. Create train and test datasets
+    trainset, testset = split_train_test(df, train_size, seed)
     
-    # 5. Train the model or load an already trained model
+    # 4. Train the model or load an already trained model
+    best_hyperparams_combination = None
     if skip_training:
         file_path = get_agg_predictions_file_path(model_name, train_size, seed)
         _, best_model = load(file_path)
@@ -603,17 +609,18 @@ def train_agg_predictions_model(model_name, train_size, group_size, num_predicte
         gs = GridSearchCV(model_class, MODELS_HYPERPARAMS[model_name], measures=['rmse'], cv=5)
         gs.fit(trainset)
         end = time.time()
-        print(f"Best params: {gs.best_params['rmse']}, RMSE score: {gs.best_score['rmse']}")
+        best_hyperparams_combination = gs.best_params['rmse']
+        print(f"Best hyperparams: {best_hyperparams_combination}, RMSE score: {gs.best_score['rmse']}")
         print(f'Elapsed time: {end-start:.3f} seconds')
         best_model = gs.best_estimator['rmse']
         best_model.fit(trainset.build_full_trainset())
 
-    # 6. Evaluate the best model on the test dataset
+    # 5. Evaluate the best model on the test dataset
     predictions = best_model.test(testset)
     print('Evaluation of best model on test dataset:')
-    metrics = compute_agg_predictions_metrics(user_group_map, predictions, num_predicted_items, relevance_threshold)
+    metrics = compute_agg_predictions_metrics(user_group_map, predictions, num_recommended_items, relevance_threshold)
 
-    # 7. Save the model if requested and training was done
+    # 6. Save the model if requested and training was done
     if save_model and not skip_training:
         print('Saving best model...')
         saved_models_path = Path(SAVED_MODELS_DIR)
@@ -621,7 +628,7 @@ def train_agg_predictions_model(model_name, train_size, group_size, num_predicte
         file_path = get_agg_predictions_file_path(model_name, train_size, seed)
         dump(file_path, algo=best_model)
 
-    return metrics
+    return best_hyperparams_combination, metrics
 
 def validate_arguments(args):
     """Validates the value of the provided command line arguments."""
@@ -630,27 +637,41 @@ def validate_arguments(args):
     if not(3 <= args.group_size <= 10):
         raise ValueError('Provided group size is not valid (given the number of users in MovieLens 100K, '
                          'must be smaller than or equal to 10)')
-    if args.num_predicted_items < 1:
+    if args.num_recommended_items < 1:
         raise ValueError('Provided value for the number of predicted items for each group is not valid')
     if not(0.5 <= args.relevance_threshold <= 5):
         raise ValueError('Provided relevance threshold is not valid for the MovieLens dataset')
     
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument('-m', '--model', choices=['SVD', 'KNNBaseline'], default='SVD')
-    parser.add_argument('-a', '--agg-method', choices=['agg-models', 'agg-predictions'], required=True)
-    parser.add_argument('-t', '--train-size', type=float, default=0.75)
-    parser.add_argument('-g', '--group-size', type=int, default=5)
-    parser.add_argument('-k', '--num-predicted-items', type=int, default=10)
-    parser.add_argument('-r', '--relevance-threshold', type=float, default=4)
-    parser.add_argument('-s', '--seed', type=int, default=714)
-    parser.add_argument('-n', '--skip-training', default=False, action='store_true')
+    parser.add_argument('-m', '--model', choices=['SVD', 'KNNBaseline'], default='SVD',
+                        help='Prediction algorithm defined in the surprise library to be trained.')
+    parser.add_argument('-a', '--agg-method', choices=['agg-models', 'agg-predictions'], required=True,
+                        help='Which aggregation strategy to use (Aggregated Models or Aggregated Predictions).')
+    parser.add_argument('-t', '--train-size', type=float, default=0.75,
+                        help='Fraction of the dataset that will be used for training.')
+    parser.add_argument('-g', '--group-size', type=int, default=5,
+                        help='Size of the groups to be created.')
+    parser.add_argument('-k', '--num-recommended-items', type=int, default=10,
+                        help='Number of items that will be recommended to each group.')
+    parser.add_argument('-r', '--relevance-threshold', type=float, default=4,
+                        help='Value in the range [0.5, 5.0], so that those items with a true rating equal to or '
+                             'greater than this one will be considered relevant.')
+    parser.add_argument('-s', '--seed', type=int, default=714,
+                        help='Seed for the pseudo-random number generator. It allow us to create the same data '
+                             'partitions and be able to reproduce the same training for the given arguments.')
+    parser.add_argument('-n', '--skip-training', default=False, action='store_true',
+                        help='If specified, training is skipped and we try to load a saved model given the value '
+                             'of other arguments. This way, we can just evaluate the loaded model on the testset '
+                             'of the same holdout partition used for it\'s training, potentially with other argument '
+                             'values (for example, other relevance threshold, or other group size in the case of '
+                             'having specified the agg-predictions strategy).')
     args = parser.parse_args()
 
     if args.agg_method == 'agg-models':
-        train_agg_models_model(args.model, args.train_size, args.group_size, args.num_predicted_items,
+        train_agg_models_model(args.model, args.train_size, args.group_size, args.num_recommended_items,
                                args.relevance_threshold, args.seed, args.skip_training)
     else:
-        train_agg_predictions_model(args.model, args.train_size, args.group_size, args.num_predicted_items,
+        train_agg_predictions_model(args.model, args.train_size, args.group_size, args.num_recommended_items,
                                     args.relevance_threshold, args.seed, args.skip_training)
     
