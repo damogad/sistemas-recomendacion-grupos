@@ -62,6 +62,8 @@ options:
   -h, --help            show this help message and exit
   -m {SVD,KNNBaseline}, --model {SVD,KNNBaseline}
                         Prediction algorithm defined in the surprise library to be trained.
+  -a {agg-models,agg-predictions}, --agg-method {agg-models,agg-predictions}
+                        Which aggregation strategy to use (Aggregated Models or Aggregated Predictions).
   -t TRAIN_SIZE, --train-size TRAIN_SIZE
                         Fraction of the dataset that will be used for training.
   -g GROUP_SIZE, --group-size GROUP_SIZE
